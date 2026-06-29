@@ -27,8 +27,8 @@ _URL_RE = re.compile(r"https?://(?:www\.)?instagram\.com/[^\s<>()]+", re.IGNOREC
 # What we treat as postable media (everything else gallery-dl writes — .json sidecars,
 # .txt — is metadata we read then ignore). Note: .m4a is intentionally absent — see the
 # `videos=merged` note below; we never want to post a bare audio stream.
-_MEDIA_EXTS = {".mp4", ".mov", ".webm", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"}
-_VIDEO_EXTS = {".mp4", ".mov", ".webm"}
+_MEDIA_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"}
+_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv"}
 
 # Instagram serves *lower*-quality video to non-Chrome clients (gallery-dl warns about
 # this), so pin a desktop-Chrome UA to get native-resolution video.
@@ -77,14 +77,16 @@ def download(url, dest_dir, cookies=None, proxy=None, timeout=180, max_files=20)
 
     # --directory (NOT --destination): write files flat into `work` with no
     #   extractor subfolders, so the os.listdir below actually finds them.
-    # videos=merged: download the single highest-res progressive MP4 (audio baked
-    #   in) instead of split DASH streams that would need a yt-dlp/ffmpeg merge.
+    # Default video handling (videos=true): for posts exposing a DASH manifest this
+    #   pulls the full *original*-resolution video and merges audio+video into one
+    #   MP4 via yt-dlp+ffmpeg (both in the image) — native res (e.g. 1080x1440).
+    #   The `merged` option would instead grab a lower-res progressive stream
+    #   (e.g. 720x960), so we deliberately do NOT set it.
     # user-agent: a desktop-Chrome UA, or Instagram serves lower-quality video.
     # Invoke via `python -m gallery_dl` (not the bare `gallery-dl` script) so it
-    # resolves from the same environment regardless of PATH.
+    #   resolves from the same environment regardless of PATH.
     cmd = [sys.executable, "-m", "gallery_dl", "--quiet", "--no-part",
            "--directory", work, "--write-metadata",
-           "-o", "extractor.instagram.videos=merged",
            "-o", f"extractor.instagram.user-agent={_CHROME_UA}"]
     if cookies:
         cmd += ["--cookies", cookies]
