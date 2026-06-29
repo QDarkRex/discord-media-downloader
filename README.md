@@ -1,0 +1,63 @@
+# discord-media-downloader
+
+A small, self-hosted Discord bot that brings TikTok and Instagram media into your server:
+
+- **TikTok** — monitor public accounts and auto-forward their new videos to a channel,
+  **plus** paste-a-link on-demand downloads. Watermark-free, H.264 so Discord plays inline.
+- **Instagram** — the **`/ig <url>`** slash command downloads any post / reel / **carousel**
+  (photos *and* videos) at **native resolution**. Paste-detect works too.
+
+Built with Python + [discord.py](https://github.com/Rapptz/discord.py), packaged as a single
+Docker container. Engines: [yt-dlp](https://github.com/yt-dlp/yt-dlp) (TikTok) and
+[gallery-dl](https://github.com/mikf/gallery-dl) (Instagram).
+
+## Features
+
+- **`/tt` command group** — `add` / `remove` / `list` tracked TikTok accounts, `get <url>` for
+  a one-off download. A paced scheduler sweeps all tracked accounts evenly (built for 70+),
+  with adaptive backoff and optional proxy support so you never hammer TikTok.
+- **`/ig <url>`** — Instagram post/reel/carousel → uploads every item to the channel.
+- **Auto-detect** — paste a TikTok or Instagram link in any channel the bot can see and it
+  downloads it automatically (toggle in `configs.yml`).
+- **Upload-cap aware** — oversized videos are ffmpeg-compressed to fit Discord's limit; if a
+  file still won't fit, the bot posts the source link instead, so nothing is silently dropped.
+  Set `max_upload_mb` to match your server's boost level (10 / 50 / 100).
+- **Hardened** — non-root container, RAM/CPU/PID caps, subprocess timeouts, optional proxy.
+
+## Quick start
+
+```bash
+cp .env.example .env      # paste your BOT_TOKEN
+docker compose up -d --build
+docker compose logs -f    # look for "is online" and "synced N slash command(s)"
+```
+
+In the Discord Developer Portal: enable the **Message Content Intent**, and invite the bot
+with the `bot` + `applications.commands` scopes.
+
+## Configuration
+
+`configs.yml` is mounted into the container, so settings-only changes need just
+`docker compose restart`. Code or dependency changes need `docker compose up -d --build`.
+
+| Setting | What it does |
+| --- | --- |
+| `max_upload_mb` | Discord upload cap. 10 (none), 50 (Level 2 boost), 100 (Level 3). |
+| `auto_detect_links` | Auto-download TikTok/Instagram links pasted in chat. |
+| `sweep_target_seconds` | How often each tracked TikTok account is re-checked. |
+| `compress_oversize` | ffmpeg-compress videos over the cap before falling back to a link. |
+| `download_timeout` / `max_files_per_post` | Instagram download guardrails. |
+
+### Cookies (optional)
+
+- **TikTok** runs fine anonymously. `TIKTOK_COOKIES` is optional, for reliability at scale.
+- **Instagram** on-demand downloads of public posts/reels usually work anonymously too. Set
+  `IG_COOKIES` (a Netscape `cookies.txt` from a logged-in, ideally throwaway, account) only if
+  you need private posts/stories or start hitting rate-limits.
+
+See [`DEPLOY.md`](DEPLOY.md) for deploying to a server.
+
+## Notes
+
+Personal, self-hosted use. Respect the source platforms' terms and the rights of creators
+whose content you download.

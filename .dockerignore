@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.git/
+.gitignore
+data/
+.env
+cookies.txt
+*.db
+.venv/
+venv/
+DEPLOY.md

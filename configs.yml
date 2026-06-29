@@ -1,0 +1,23 @@
+# TikTok bot settings. Mounted into the container, so changes here only need
+# `docker compose restart` (no rebuild).
+
+prefix: "!"
+activity_name: "TikTok"
+
+# Monitoring (paced scheduler — sweeps all tracked accounts, evenly spaced)
+sweep_target_seconds: 150   # re-check each account roughly every ~2.5 min
+min_request_spacing: 1.5    # safety floor: never request faster than this (seconds)
+request_jitter: 0.5         # +/- random seconds added to spacing (less robotic)
+playlist_scan_count: 5      # how many recent videos to scan per check
+
+# On-demand
+auto_detect_links: true   # auto-download TikTok/Instagram links pasted in chat
+
+# Instagram (/ig command)
+download_timeout: 180     # kill a gallery-dl download that runs longer than this (seconds)
+max_files_per_post: 20    # safety cap on media files pulled from one IG carousel
+
+# Upload handling
+max_upload_mb: 50         # Discord Level 2 boost upload cap (~50 MB) — bigger cap = higher native res, less compression
+compress_oversize: true   # try ffmpeg compression before falling back to a link
+compress_timeout: 120     # kill an ffmpeg compress that runs longer than this (seconds)

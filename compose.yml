@@ -1,0 +1,13 @@
+services:
+  tiktokbot:
+    build: .
+    container_name: tiktokbot
+    restart: unless-stopped
+    env_file: .env
+    # Resource caps so the bot can never starve the host or its neighbour containers.
+    mem_limit: 512m
+    cpus: 2.0
+    pids_limit: 256
+    volumes:
+      - ./data/:/bot/data          # SQLite db + temp downloads (+ optional cookies.txt)
+      - ./configs.yml:/bot/configs.yml
