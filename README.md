@@ -51,9 +51,10 @@ with the `bot` + `applications.commands` scopes.
 ### Cookies (optional)
 
 - **TikTok** runs fine anonymously. `TIKTOK_COOKIES` is optional, for reliability at scale.
-- **Instagram** on-demand downloads of public posts/reels usually work anonymously too. Set
-  `IG_COOKIES` (a Netscape `cookies.txt` from a logged-in, ideally throwaway, account) only if
-  you need private posts/stories or start hitting rate-limits.
+- **Instagram** requires login to view individual posts — a direct post/reel link redirects to
+  the login page when logged out, so `/ig` needs **`IG_COOKIES`** set to a Netscape `cookies.txt`
+  exported from a logged-in (ideally throwaway) account. Cookies also unlock original photo
+  resolution (anonymous display tops out around 1080px wide).
 
 See [`DEPLOY.md`](DEPLOY.md) for deploying to a server.
 

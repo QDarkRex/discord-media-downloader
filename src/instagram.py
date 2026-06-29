@@ -18,15 +18,22 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 
 # Matches instagram.com post/reel/tv/story/profile links (incl. share-suffixed ones).
 _URL_RE = re.compile(r"https?://(?:www\.)?instagram\.com/[^\s<>()]+", re.IGNORECASE)
 
 # What we treat as postable media (everything else gallery-dl writes — .json sidecars,
-# .txt — is metadata we read then ignore).
+# .txt — is metadata we read then ignore). Note: .m4a is intentionally absent — see the
+# `videos=merged` note below; we never want to post a bare audio stream.
 _MEDIA_EXTS = {".mp4", ".mov", ".webm", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic"}
 _VIDEO_EXTS = {".mp4", ".mov", ".webm"}
+
+# Instagram serves *lower*-quality video to non-Chrome clients (gallery-dl warns about
+# this), so pin a desktop-Chrome UA to get native-resolution video.
+_CHROME_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
 
 
 def find_links(text):
@@ -68,8 +75,17 @@ def download(url, dest_dir, cookies=None, proxy=None, timeout=180, max_files=20)
     os.makedirs(dest_dir, exist_ok=True)
     work = tempfile.mkdtemp(prefix="ig_", dir=dest_dir)
 
-    cmd = ["gallery-dl", "--quiet", "--no-part",
-           "--destination", work, "--write-metadata"]
+    # --directory (NOT --destination): write files flat into `work` with no
+    #   extractor subfolders, so the os.listdir below actually finds them.
+    # videos=merged: download the single highest-res progressive MP4 (audio baked
+    #   in) instead of split DASH streams that would need a yt-dlp/ffmpeg merge.
+    # user-agent: a desktop-Chrome UA, or Instagram serves lower-quality video.
+    # Invoke via `python -m gallery_dl` (not the bare `gallery-dl` script) so it
+    # resolves from the same environment regardless of PATH.
+    cmd = [sys.executable, "-m", "gallery_dl", "--quiet", "--no-part",
+           "--directory", work, "--write-metadata",
+           "-o", "extractor.instagram.videos=merged",
+           "-o", f"extractor.instagram.user-agent={_CHROME_UA}"]
     if cookies:
         cmd += ["--cookies", cookies]
     if proxy:

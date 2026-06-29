@@ -28,8 +28,9 @@ def _resolve_cookies():
 def _resolve_ig_cookies():
     path = (os.getenv("IG_COOKIES") or "").strip()
     if not path:
-        log.info("IG_COOKIES not set — running anonymously. On-demand downloads of public "
-                 "posts/reels usually work; set IG_COOKIES if you hit 'no media' or rate-limits.")
+        log.warning("IG_COOKIES not set — Instagram requires login to view individual posts, so "
+                    "/ig will return 'no media' for most links. Export a cookies.txt from a "
+                    "logged-in (burner) account and point IG_COOKIES at it.")
         return None
     if not os.path.exists(path):
         log.warning("IG_COOKIES set to %s but file not found — continuing without cookies", path)
