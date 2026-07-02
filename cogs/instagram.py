@@ -12,6 +12,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from src import instagram
+from src.discord_utils import suppress_link_embeds
 from src.instagram_post import handle_url
 from src.log import get_logger
 
@@ -70,6 +71,8 @@ class Instagram(commands.Cog):
                                      self._workdir(), self.bot.ig_proxy)
             except Exception:
                 log.exception("auto-download failed for %s", url)
+        # Strip Discord's redundant link-preview embed now that we've reposted it.
+        await suppress_link_embeds(message, self.bot.cfg)
 
 
 async def setup(bot):

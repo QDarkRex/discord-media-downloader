@@ -12,7 +12,8 @@ DEFAULTS = {
     "request_jitter": 0.5,        # +/- random seconds added to spacing (less robotic)
     "playlist_scan_count": 5,     # how many recent videos to scan per check
     # On-demand
-    "auto_detect_links": True,   # auto-download TikTok/Instagram links pasted in chat
+    "auto_detect_links": True,       # auto-download TikTok/Instagram links pasted in chat
+    "suppress_link_embeds": True,    # remove Discord's auto link-preview embed once the bot reposts it
     # Instagram (/ig)
     "download_timeout": 180,     # kill a gallery-dl download that runs longer than this (seconds)
     "max_files_per_post": 20,    # safety cap on media files pulled from one IG carousel
