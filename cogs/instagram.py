@@ -1,8 +1,8 @@
-"""The whole `/ig` command group + Instagram post monitoring.
+"""The whole `/ig` command group + Instagram post/story monitoring.
 
 Commands (mirroring `/tt`):
-  /ig get <url>                 on-demand download of a post/reel/carousel
-  /ig add <user> [chan] [tag]   forward an account's NEW posts (optionally ping a role/person)
+  /ig get <url>                        on-demand download of a post/reel/carousel
+  /ig add <user> [chan] [tag] [type]   forward an account's NEW posts and/or stories
   /ig remove <user> [chan]
   /ig list
 
@@ -11,13 +11,19 @@ Plus a passive listener that auto-downloads Instagram links pasted in chat.
 Monitoring is sharded across one or more "burners" (each a cookie+proxy pair). Each
 burner runs its OWN poller in parallel and only handles the accounts assigned to it
 (by a stable hash of the username), so load — and ban risk — is split across separate
-logins/IPs. Polling is deliberately much slower than TikTok's: Instagram flags
+logins/IPs. Polling is deliberately much slower than TikTok's — Instagram flags
 aggressive automated access.
+
+Stories can only be pulled as the whole current set (Instagram has no per-item URL),
+so we list them cheaply, and only download+forward when something is newer than the
+last item we handled. NOTE: viewing a story puts the burner in that account's
+story-viewers list.
 """
 import asyncio
 import hashlib
 import os
 import random
+import shutil
 from collections import defaultdict
 from typing import Optional, Union
 
@@ -27,7 +33,7 @@ from discord.ext import commands
 
 from src import db, instagram, mentions, monitor
 from src.discord_utils import suppress_link_embeds
-from src.instagram_post import handle_url
+from src.instagram_post import handle_url, post_media
 from src.log import get_logger
 
 log = get_logger(__name__)
@@ -41,17 +47,24 @@ def _short(e):
     return msg.splitlines()[-1] if msg else e.__class__.__name__
 
 
+def _cleanup(paths):
+    for p in paths:
+        if p and os.path.exists(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
 class Instagram(commands.Cog):
-    ig = app_commands.Group(name="ig", description="Download Instagram media & forward new posts")
+    ig = app_commands.Group(name="ig", description="Download Instagram media & forward new posts/stories")
 
     def __init__(self, bot):
         self.bot = bot
         self._poller_tasks = []
-        # one adaptive-backoff factor per burner
         self._backoff = [1.0] * max(len(getattr(bot, "ig_burners", [])), 1)
 
     async def cog_load(self):
-        # One poller per burner — they run in parallel, each on its own cookie/proxy.
         for bi in range(len(self.bot.ig_burners)):
             self._poller_tasks.append(asyncio.create_task(self._run_poller(bi)))
 
@@ -63,8 +76,8 @@ class Instagram(commands.Cog):
         return os.path.join(os.getenv("DATA_PATH", "./data"), "downloads")
 
     def _burner_for(self, username):
-        """Stable account -> burner assignment (survives restarts, so an account never
-        hops burners). Returns (index, cookies, proxy) or None if no burners."""
+        """Stable account -> burner assignment (survives restarts). Returns
+        (index, cookies, proxy) or None if no burners configured."""
         burners = self.bot.ig_burners
         if not burners:
             return None
@@ -99,12 +112,19 @@ class Instagram(commands.Cog):
             except discord.HTTPException:
                 pass
 
-    @ig.command(name="add", description="Forward an Instagram account's new posts")
+    @ig.command(name="add", description="Forward an Instagram account's new posts and/or stories")
     @app_commands.describe(username="Instagram @username",
                            channel="Where to post (default: this channel/thread)",
-                           tag="Optional role or person to ping on each new post")
+                           tag="Optional role or person to ping on each new item",
+                           type="What to forward (default: posts)")
+    @app_commands.choices(type=[
+        app_commands.Choice(name="posts", value="post"),
+        app_commands.Choice(name="stories", value="story"),
+        app_commands.Choice(name="both", value="both"),
+    ])
     async def add(self, interaction: discord.Interaction, username: str,
-                  channel: Optional[Target] = None, tag: Optional[Tag] = None):
+                  channel: Optional[Target] = None, tag: Optional[Tag] = None,
+                  type: Optional[app_commands.Choice[str]] = None):
         await interaction.response.defer(ephemeral=True)
         username = instagram.normalize_username(username)
         burner = self._burner_for(username)
@@ -116,9 +136,14 @@ class Instagram(commands.Cog):
         _bi, cookies, proxy = burner
         target = channel or interaction.channel
         mtype, mid = mentions.parse_target(tag)
-        # Seed baseline = current newest post id (via this account's assigned burner).
+        kind = type.value if type else "post"
+        wants_posts = kind in ("post", "both")
+        wants_stories = kind in ("story", "both")
+
+        # Verify the account is readable (this also seeds the post baseline).
         try:
-            recent = await asyncio.to_thread(instagram.list_recent, username, 1, cookies, proxy)
+            recent = await asyncio.to_thread(instagram.list_recent, username, 1, cookies, proxy) \
+                if wants_posts else []
         except Exception as e:
             log.warning("ig add: couldn't read @%s (%s)", username, _short(e))
             await interaction.followup.send(
@@ -126,15 +151,30 @@ class Instagram(commands.Cog):
                 f"Instagram cookies are valid (private accounts need the burner to follow them).",
                 ephemeral=True)
             return
-        baseline = recent[0]["id"] if recent else None
-        await db.add_subscription(self.bot.db_path, "instagram", username, str(target.id),
-                                  str(interaction.guild_id), "post", mtype, mid, baseline)
+
+        added = []
+        if wants_posts:
+            baseline = recent[0]["id"] if recent else None
+            await db.add_subscription(self.bot.db_path, "instagram", username, str(target.id),
+                                      str(interaction.guild_id), "post", mtype, mid, baseline)
+            added.append("posts")
+        if wants_stories:
+            try:
+                st = await asyncio.to_thread(instagram.list_stories, username, cookies, proxy)
+            except Exception:
+                st = []
+            await db.add_subscription(self.bot.db_path, "instagram", username, str(target.id),
+                                      str(interaction.guild_id), "story", mtype, mid,
+                                      st[0]["id"] if st else None)
+            added.append("stories")
+
         ping = f" and ping {mentions.mention_string(mtype, mid)}" if mtype else ""
+        note = ""
+        if wants_stories:
+            note = "\n_(Heads up: viewing stories puts this burner in the account's story-viewers list.)_"
         await interaction.followup.send(
-            f"✅ Watching **@{username}** → {target.mention}{ping}. New posts will show up there.\n"
-            f"_(Instagram is polled slowly to keep the account safe — expect new posts within "
-            f"~10–30 min depending on how many accounts are watched.)_",
-            ephemeral=True)
+            f"✅ Watching **@{username}** ({' + '.join(added)}) → {target.mention}{ping}. "
+            f"New items appear within ~10–30 min.{note}", ephemeral=True)
 
     @ig.command(name="remove", description="Stop forwarding an Instagram account")
     @app_commands.describe(username="Instagram @username", channel="Only this channel (default: everywhere)")
@@ -142,8 +182,11 @@ class Instagram(commands.Cog):
                      channel: Optional[Target] = None):
         await interaction.response.defer(ephemeral=True)
         username = instagram.normalize_username(username)
-        n = await db.remove_subscription(self.bot.db_path, "instagram", username,
-                                         str(channel.id) if channel else None)
+        chan = str(channel.id) if channel else None
+        # remove both posts and stories subscriptions
+        n = 0
+        for ctype in ("post", "story"):
+            n += await db.remove_subscription(self.bot.db_path, "instagram", username, chan, ctype)
         if n:
             await interaction.followup.send(f"✅ Removed **@{username}** ({n} subscription(s)).", ephemeral=True)
         else:
@@ -157,9 +200,10 @@ class Instagram(commands.Cog):
             await interaction.followup.send("No Instagram accounts watched yet. Use `/ig add`.", ephemeral=True)
             return
         lines = []
-        for username, channel_id, _ctype, mtype, mid, _last, enabled in rows:
+        for username, channel_id, ctype, mtype, mid, _last, enabled in rows:
             mark = "" if enabled else " *(paused)*"
-            lines.append(f"• **@{username}** → <#{channel_id}>{mentions.label(mtype, mid)}{mark}")
+            kind = "stories" if ctype == "story" else "posts"
+            lines.append(f"• **@{username}** ({kind}) → <#{channel_id}>{mentions.label(mtype, mid)}{mark}")
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     # ---- auto-detect listener --------------------------------------------
@@ -173,14 +217,13 @@ class Instagram(commands.Cog):
         links = instagram.find_links(message.content)
         if not links:
             return
-        for url in links[:3]:  # cap per message
+        for url in links[:3]:
             try:
                 async with message.channel.typing():
                     await handle_url(message.channel, url, self.bot.cfg, self.bot.ig_cookies,
                                      self._workdir(), self.bot.ig_proxy)
             except Exception:
                 log.exception("auto-download failed for %s", url)
-        # Strip Discord's redundant link-preview embed now that we've reposted it.
         await suppress_link_embeds(message, self.bot.cfg)
 
     # ---- paced scheduler (per-burner, slow) -------------------------------
@@ -210,42 +253,107 @@ class Instagram(commands.Cog):
         cookies = self.bot.ig_burners[bi]["cookies"]
         proxy = self.bot.ig_burners[bi]["proxy"]
 
-        rows = await db.get_enabled(self.bot.db_path, "instagram", "post")
-        by_user = defaultdict(list)
-        for username, channel_id, mtype, mid, last_seen in rows:
-            # Only handle accounts assigned to THIS burner.
-            if self._burner_for(username)[0] != bi:
-                continue
-            by_user[username].append((channel_id, mtype, mid, last_seen))
-        if not by_user:
-            await asyncio.sleep(30)  # nothing on this burner yet — idle
+        posts_by, stories_by = defaultdict(list), defaultdict(list)
+        for username, channel_id, mtype, mid, last_seen in \
+                await db.get_enabled(self.bot.db_path, "instagram", "post"):
+            if self._burner_for(username)[0] == bi:
+                posts_by[username].append((channel_id, mtype, mid, last_seen))
+        for username, channel_id, mtype, mid, last_seen in \
+                await db.get_enabled(self.bot.db_path, "instagram", "story"):
+            if self._burner_for(username)[0] == bi:
+                stories_by[username].append((channel_id, mtype, mid, last_seen))
+
+        users = set(posts_by) | set(stories_by)
+        if not users:
+            await asyncio.sleep(30)
             return
 
-        spacing = self._spacing(len(by_user)) * self._backoff[bi]
+        spacing = self._spacing(len(users)) * self._backoff[bi]
         failures = 0
-        for username, subs in by_user.items():
-            if not await self._check_account(username, subs, cookies, proxy):
+        for username in users:
+            if not await self._check_account(username, posts_by.get(username),
+                                             stories_by.get(username), cookies, proxy):
                 failures += 1
             await asyncio.sleep(self._jittered(spacing))
 
-        if failures / len(by_user) >= 0.3:
+        if failures / len(users) >= 0.3:
             self._backoff[bi] = min(self._backoff[bi] * 2, 8.0)
             log.warning("ig poll[%d]: %d/%d accounts failed — slowing down (spacing x%.0f)",
-                        bi, failures, len(by_user), self._backoff[bi])
+                        bi, failures, len(users), self._backoff[bi])
         elif failures == 0 and self._backoff[bi] > 1.0:
             self._backoff[bi] = max(self._backoff[bi] / 2, 1.0)
             log.info("ig poll[%d]: recovered — easing back (spacing x%.1f)", bi, self._backoff[bi])
 
-    async def _check_account(self, username, subs, cookies, proxy):
-        scan = int(self.bot.cfg.get("ig_playlist_scan_count", 3))
+    async def _check_account(self, username, post_subs, story_subs, cookies, proxy):
+        ok = True
+        if post_subs:
+            scan = int(self.bot.cfg.get("ig_playlist_scan_count", 3))
+            try:
+                recent = await asyncio.to_thread(instagram.list_recent, username, scan, cookies, proxy)
+            except Exception as e:
+                log.warning("ig poll: couldn't list posts @%s (%s)", username, _short(e))
+                ok = False
+            else:
+                await monitor.forward_new(self.bot, "instagram", username, post_subs, recent,
+                                          handle_url, self._workdir(), cookies, proxy, "Instagram")
+        if story_subs:
+            try:
+                await self._forward_stories(username, story_subs, cookies, proxy)
+            except Exception as e:
+                log.warning("ig poll: story check failed @%s (%s)", username, _short(e))
+                ok = False
+        return ok
+
+    async def _forward_stories(self, username, subs, cookies, proxy):
+        items = await asyncio.to_thread(instagram.list_stories, username, cookies, proxy)
+        if not items:
+            return
+        current_ids = [it["id"] for it in items]   # newest-first
+        newest = current_ids[0]
+        downloaded = None
         try:
-            recent = await asyncio.to_thread(instagram.list_recent, username, scan, cookies, proxy)
-        except Exception as e:
-            log.warning("ig poll: couldn't list @%s (%s)", username, _short(e))
-            return False
-        await monitor.forward_new(self.bot, "instagram", username, subs, recent, handle_url,
-                                  self._workdir(), cookies, proxy, "Instagram")
-        return True
+            for channel_id, mtype, mid, last_seen in subs:
+                if last_seen is None:
+                    await db.update_last_seen(self.bot.db_path, "instagram", username,
+                                              channel_id, newest, "story")
+                    continue
+                new_ids = [i for i in current_ids if int(i) > int(last_seen)]  # newest-first
+                if not new_ids:
+                    continue
+                channel = self.bot.get_channel(int(channel_id))
+                if channel is None:
+                    log.warning("ig story: channel %s for @%s not found", channel_id, username)
+                    continue
+                if downloaded is None:
+                    downloaded = await asyncio.to_thread(instagram.download_stories, username,
+                                                         self._workdir(), cookies, proxy)
+                idmap = {it["id"]: it["path"] for it in downloaded["items"]}
+                for sid in reversed(new_ids):   # oldest-first
+                    path = idmap.get(sid)
+                    if path is None:
+                        # listed but not in the download (expired mid-check) — skip it
+                        await db.update_last_seen(self.bot.db_path, "instagram", username,
+                                                  channel_id, sid, "story")
+                        continue
+                    scratch = []
+                    try:
+                        if mtype:
+                            await mentions.announce(channel, mtype, mid,
+                                                    f"new Instagram story from **@{username}**")
+                        await post_media(channel, [path], f"**@{username}** — story",
+                                         self.bot.cfg, scratch)
+                    except Exception as e:
+                        log.warning("ig story forward failed @%s %s (%s); retry next sweep",
+                                    username, sid, _short(e))
+                        _cleanup(scratch)
+                        break
+                    _cleanup(scratch)
+                    await db.update_last_seen(self.bot.db_path, "instagram", username,
+                                              channel_id, sid, "story")
+                    log.info("forwarded Instagram story @%s %s -> channel %s", username, sid, channel_id)
+        finally:
+            if downloaded:
+                shutil.rmtree(downloaded["dir"], ignore_errors=True)
 
 
 async def setup(bot):

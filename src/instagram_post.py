@@ -76,10 +76,38 @@ async def _send_batch(channel, paths, content):
         first = False
 
 
+async def post_media(channel, media, caption, cfg, scratch, link_fallback=None):
+    """Send already-downloaded media files to `channel`, compressing oversize videos
+    and batching (<=10 per message, caption on the first). Returns True if anything was
+    uploaded. `scratch` collects temp compressed files for the caller to clean up.
+    Items too big to upload are linked via `link_fallback` (a URL) if given, else noted.
+    """
+    max_mb = float(cfg.get("max_upload_mb", 10))
+    sendable, linked = [], []
+    for p in media:
+        ready = await _prepare(p, max_mb, cfg, scratch)
+        (sendable if ready else linked).append(ready or p)
+
+    uploaded = False
+    first = True
+    for i in range(0, len(sendable), _MAX_ATTACHMENTS):
+        await _send_batch(channel, sendable[i:i + _MAX_ATTACHMENTS], caption if first else None)
+        uploaded = True
+        first = False
+
+    if linked:
+        note = (caption + "\n" if (caption and not uploaded) else "")
+        if link_fallback:
+            await channel.send(content=f"{note}{link_fallback}\n"
+                               f"_({len(linked)} item(s) too large to upload — see above)_".strip())
+        elif not uploaded:
+            await channel.send(content=f"{note}_({len(linked)} item(s) too large to upload)_".strip())
+    return uploaded
+
+
 async def handle_url(channel, url, cfg, cookies, workdir, proxy=None):
     """Download `url` and post all of its media to `channel`. Returns True if any
     file was uploaded. Cleans up the temp download dir afterwards."""
-    max_mb = float(cfg.get("max_upload_mb", 10))
     info = await asyncio.to_thread(
         instagram.download, url, workdir, cookies, proxy,
         int(cfg.get("download_timeout", 180)), int(cfg.get("max_files_per_post", 20)),
@@ -98,27 +126,7 @@ async def handle_url(channel, url, cfg, cookies, workdir, proxy=None):
                                else f"{url}{hint}")
             return False
 
-        sendable, linked = [], []
-        for p in media:
-            ready = await _prepare(p, max_mb, cfg, scratch)
-            (sendable if ready else linked).append(ready or p)
-
-        uploaded = False
-        # Send the uploadable files in batches of 10, caption on the first message.
-        first = True
-        for i in range(0, len(sendable), _MAX_ATTACHMENTS):
-            batch = sendable[i:i + _MAX_ATTACHMENTS]
-            await _send_batch(channel, batch, caption if first else None)
-            uploaded = True
-            first = False
-
-        # Anything too big to upload -> link the source post once.
-        if linked:
-            note = (caption + "\n" if (caption and not uploaded) else "")
-            await channel.send(content=f"{note}{url}\n"
-                               f"_({len(linked)} item(s) too large to upload — see post above)_".strip())
-
-        return uploaded
+        return await post_media(channel, media, caption, cfg, scratch, link_fallback=url)
     finally:
         if work_dir and os.path.isdir(work_dir):
             shutil.rmtree(work_dir, ignore_errors=True)

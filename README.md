@@ -2,10 +2,11 @@
 
 A small, self-hosted Discord bot that brings TikTok and Instagram media into your server:
 
-- **TikTok** — monitor public accounts and auto-forward their new videos to a channel,
+- **TikTok** — monitor accounts and auto-forward their new videos to a channel/thread,
   **plus** paste-a-link on-demand downloads. Watermark-free, H.264 so Discord plays inline.
-- **Instagram** — the **`/ig <url>`** slash command downloads any post / reel / **carousel**
-  (photos *and* videos) at **native resolution**. Paste-detect works too.
+- **Instagram** — on-demand downloads (`/ig get`) of any post / reel / **carousel** (photos
+  *and* videos) at **native resolution**, **plus** monitoring of new **posts and stories**.
+- **Tag on new content** — optionally ping a role or person when a tracked account posts.
 
 Built with Python + [discord.py](https://github.com/Rapptz/discord.py), packaged as a single
 Docker container. Engines: [yt-dlp](https://github.com/yt-dlp/yt-dlp) (TikTok) and
@@ -13,12 +14,16 @@ Docker container. Engines: [yt-dlp](https://github.com/yt-dlp/yt-dlp) (TikTok) a
 
 ## Features
 
-- **`/tt` command group** — `add` / `remove` / `list` tracked TikTok accounts, `get <url>` for
-  a one-off download. A paced scheduler sweeps all tracked accounts evenly (built for 70+),
-  with adaptive backoff and optional proxy support so you never hammer TikTok.
-- **`/ig <url>`** — Instagram post/reel/carousel → uploads every item to the channel.
+- **`/tt` group** — `add` / `remove` / `list` / `get <url>`. `add` takes an optional `tag`
+  (role/person to ping) and can target a thread. A paced scheduler sweeps all tracked
+  accounts evenly with adaptive backoff and optional proxy support.
+- **`/ig` group** — `get <url>` (on-demand), plus `add` / `remove` / `list` to forward an
+  account's new **posts and/or stories** (`type:` posts | stories | both), with the same
+  `tag` + thread options. Monitoring is sharded across one or more burner logins
+  (`IG_COOKIES`), each with its own proxy, and polled slowly to respect Instagram.
 - **Auto-detect** — paste a TikTok or Instagram link in any channel the bot can see and it
-  downloads it automatically (toggle in `configs.yml`).
+  downloads it automatically, then suppresses Discord's redundant preview embed
+  (toggles in `configs.yml`).
 - **Upload-cap aware** — oversized videos are ffmpeg-compressed to fit Discord's limit; if a
   file still won't fit, the bot posts the source link instead, so nothing is silently dropped.
   Set `max_upload_mb` to match your server's boost level (10 / 50 / 100).

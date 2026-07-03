@@ -168,6 +168,79 @@ def download(url, dest_dir, cookies=None, proxy=None, timeout=180, max_files=20)
     }
 
 
+_DIGITS_RE = re.compile(r"(\d{6,})")
+
+
+def list_stories(username, cookies=None, proxy=None, timeout=60):
+    """List an account's CURRENT story items without downloading (cheap check).
+
+    Returns [{"id": media_id}, ...] newest-first (id is the numeric media pk, which
+    is time-ordered). Empty if the account has no active story (or isn't viewable).
+    Stories require login and the burner must be able to see them.
+    """
+    username = normalize_username(username)
+    url = f"https://www.instagram.com/stories/{username}/"
+    cmd = [sys.executable, "-m", "gallery_dl", "-j", "--no-download",
+           "-o", f"extractor.instagram.user-agent={_CHROME_UA}"]
+    if cookies:
+        cmd += ["--cookies", cookies]
+    if proxy:
+        cmd += ["--proxy", proxy]
+    cmd += ["--", url]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except ValueError:
+        raise RuntimeError((proc.stderr or "gallery-dl produced no JSON").strip()[-300:])
+
+    ids, seen = [], set()
+    for entry in data:
+        meta = entry[-1] if isinstance(entry, list) and entry and isinstance(entry[-1], dict) else None
+        if not meta:
+            continue
+        mid = meta.get("media_id")
+        if not mid or str(mid) in seen:
+            continue
+        seen.add(str(mid))
+        ids.append({"id": str(mid)})
+    ids.sort(key=lambda x: int(x["id"]), reverse=True)   # newest-first
+    return ids
+
+
+def download_stories(username, dest_dir, cookies=None, proxy=None, timeout=180, max_items=30):
+    """Download an account's CURRENT story items (the whole set — Instagram has no
+    per-item story URL). Returns {"dir", "username", "items": [{"id", "path"}, ...]}
+    newest-first. Callers pick which items are new and clean up "dir" afterwards.
+    """
+    username = normalize_username(username)
+    os.makedirs(dest_dir, exist_ok=True)
+    work = tempfile.mkdtemp(prefix="ig_story_", dir=dest_dir)
+    url = f"https://www.instagram.com/stories/{username}/"
+    cmd = [sys.executable, "-m", "gallery_dl", "--quiet", "--no-part",
+           "--directory", work, "--write-metadata",
+           "-o", f"extractor.instagram.user-agent={_CHROME_UA}"]
+    if cookies:
+        cmd += ["--cookies", cookies]
+    if proxy:
+        cmd += ["--proxy", proxy]
+    cmd += ["--", url]
+
+    subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+    items = []
+    for name in os.listdir(work):
+        if os.path.splitext(name)[1].lower() not in _MEDIA_EXTS:
+            continue
+        # The story's media id is the leading digits of the filename (time-ordered).
+        m = _DIGITS_RE.match(name)
+        if not m:
+            continue
+        items.append({"id": m.group(1), "path": os.path.join(work, name)})
+    items.sort(key=lambda x: int(x["id"]), reverse=True)   # newest-first
+    return {"dir": work, "username": username, "items": items[:max_items]}
+
+
 if __name__ == "__main__":
     # Local smoke test:  python -m src.instagram <instagram_url> [cookies.txt]
     import sys
