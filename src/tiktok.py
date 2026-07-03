@@ -80,15 +80,22 @@ def list_recent(username, count=5, cookies=None, proxy=None):
     return out
 
 
-def _video_format(cap_mb):
+def _video_format(cap_mb, native=True):
     """Build a yt-dlp format selector.
 
     TikTok offers the same clip as h264 and h265 (bytevc1), plus a watermarked
-    variant whose format_id is literally "download". We exclude that by id, prefer
-    H.264 (so Discord plays it inline; h265 often won't), and — when sizes are known
-    — prefer the best H.264 that already fits under the upload cap to avoid needless
-    re-encoding. Fallbacks widen the net for odd layouts.
+    variant whose format_id is literally "download" (always excluded by id).
+
+    native=True  -> highest resolution regardless of codec (format_sort tie-breaks
+                    to h264 when a codec choice exists at the top resolution). On
+                    TikTok the 1080p rendition is often h265-only, so this is what
+                    delivers native quality — but h265 may not inline-preview on
+                    every Discord client (same trade-off as Instagram's native VP9).
+    native=False -> force h264 so Discord always plays it inline, even though that
+                    can cap TikTok at 720p.
     """
+    if native:
+        return "b[format_id!=download]/b"
     cap = int(cap_mb)
     return (
         f"b[vcodec^=h264][filesize<{cap}M][format_id!=download]"  # best h264 that fits, no watermark
@@ -99,17 +106,17 @@ def _video_format(cap_mb):
     )
 
 
-def download(url, dest_dir, cookies=None, max_mb=10, proxy=None):
+def download(url, dest_dir, cookies=None, max_mb=10, proxy=None, native=True):
     """Download one video (watermark-free). Returns metadata incl. local 'path'.
 
-    Prefers an h264/mp4 progressive file so Discord can play it inline. For
-    photo/slideshow posts (no video stream) yt-dlp yields audio only — callers
-    detect that via the returned 'ext'/'vcodec' and fall back to posting the link.
+    With native=True picks the highest-resolution rendition (see _video_format). For
+    photo/slideshow posts (no video stream) yt-dlp yields audio only — callers detect
+    that via the returned 'ext'/'vcodec' and fall back to posting the link.
     """
     os.makedirs(dest_dir, exist_ok=True)
     opts = _base_opts(cookies, proxy)
     opts.update({
-        "format": _video_format(max_mb),
+        "format": _video_format(max_mb, native),
         "format_sort": ["res", "vcodec:h264"],  # highest res, tie-break to h264
         "outtmpl": os.path.join(dest_dir, "%(id)s.%(ext)s"),
         "restrictfilenames": True,

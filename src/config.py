@@ -23,6 +23,9 @@ DEFAULTS = {
     "ig_min_request_spacing": 20,     # never fire IG requests faster than this (seconds, per burner)
     "ig_request_jitter": 5,           # +/- random seconds added to IG spacing
     "ig_playlist_scan_count": 3,      # how many recent posts to scan per IG check
+    # TikTok video quality
+    "tiktok_native": True,       # grab highest resolution even if h265 (native, may not inline-preview);
+                                 # set False to force h264 (always inline-plays, but can cap at 720p)
     # Upload handling
     "max_upload_mb": 10,         # Discord free-tier upload cap (~10 MB)
     "compress_oversize": True,   # ffmpeg-compress videos over the cap before falling back to a link

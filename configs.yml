@@ -27,6 +27,10 @@ ig_min_request_spacing: 20      # never request faster than this (seconds, per b
 ig_request_jitter: 5            # +/- random seconds added to spacing
 ig_playlist_scan_count: 3       # how many recent posts to scan per check
 
+# TikTok video quality
+tiktok_native: true       # true = native resolution even if h265 1080p (may not inline-preview on some
+                          # clients); false = force h264 so it always plays inline (can cap TikTok at 720p)
+
 # Upload handling
 max_upload_mb: 50         # Discord Level 2 boost upload cap (~50 MB) — bigger cap = higher native res, less compression
 compress_oversize: true   # try ffmpeg compression before falling back to a link
