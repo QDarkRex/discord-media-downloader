@@ -1,17 +1,21 @@
 """The whole `/ig` command group + Instagram post monitoring.
 
 Commands (mirroring `/tt`):
-  /ig get <url>            on-demand download of a post/reel/carousel
+  /ig get <url>                 on-demand download of a post/reel/carousel
   /ig add <user> [chan] [tag]   forward an account's NEW posts (optionally ping a role/person)
   /ig remove <user> [chan]
   /ig list
 
-Plus a passive listener that auto-downloads Instagram links pasted in chat, and a
-background poller. The poller is deliberately MUCH slower than TikTok's — Instagram
-flags aggressive automated access, so we re-check each account only every ~30 min to
-protect the burner account whose cookies we use.
+Plus a passive listener that auto-downloads Instagram links pasted in chat.
+
+Monitoring is sharded across one or more "burners" (each a cookie+proxy pair). Each
+burner runs its OWN poller in parallel and only handles the accounts assigned to it
+(by a stable hash of the username), so load — and ban risk — is split across separate
+logins/IPs. Polling is deliberately much slower than TikTok's: Instagram flags
+aggressive automated access.
 """
 import asyncio
+import hashlib
 import os
 import random
 from collections import defaultdict
@@ -42,18 +46,31 @@ class Instagram(commands.Cog):
 
     def __init__(self, bot):
         self.bot = bot
-        self._poller_task = None
-        self._backoff = 1.0  # widens request spacing when Instagram starts refusing
+        self._poller_tasks = []
+        # one adaptive-backoff factor per burner
+        self._backoff = [1.0] * max(len(getattr(bot, "ig_burners", [])), 1)
 
     async def cog_load(self):
-        self._poller_task = asyncio.create_task(self._run_poller())
+        # One poller per burner — they run in parallel, each on its own cookie/proxy.
+        for bi in range(len(self.bot.ig_burners)):
+            self._poller_tasks.append(asyncio.create_task(self._run_poller(bi)))
 
     def cog_unload(self):
-        if self._poller_task:
-            self._poller_task.cancel()
+        for t in self._poller_tasks:
+            t.cancel()
 
     def _workdir(self):
         return os.path.join(os.getenv("DATA_PATH", "./data"), "downloads")
+
+    def _burner_for(self, username):
+        """Stable account -> burner assignment (survives restarts, so an account never
+        hops burners). Returns (index, cookies, proxy) or None if no burners."""
+        burners = self.bot.ig_burners
+        if not burners:
+            return None
+        idx = int(hashlib.md5(username.encode()).hexdigest(), 16) % len(burners)
+        b = burners[idx]
+        return (idx, b["cookies"], b["proxy"])
 
     # ---- commands ---------------------------------------------------------
 
@@ -90,12 +107,18 @@ class Instagram(commands.Cog):
                   channel: Optional[Target] = None, tag: Optional[Tag] = None):
         await interaction.response.defer(ephemeral=True)
         username = instagram.normalize_username(username)
+        burner = self._burner_for(username)
+        if burner is None:
+            await interaction.followup.send(
+                "❌ No Instagram cookies are configured, so monitoring is off. "
+                "Set `IG_COOKIES` to a burner cookies.txt first.", ephemeral=True)
+            return
+        _bi, cookies, proxy = burner
         target = channel or interaction.channel
         mtype, mid = mentions.parse_target(tag)
-        # Seed baseline = current newest post id, so we don't dump the back-catalogue.
+        # Seed baseline = current newest post id (via this account's assigned burner).
         try:
-            recent = await asyncio.to_thread(instagram.list_recent, username, 1,
-                                             self.bot.ig_cookies, self.bot.ig_proxy)
+            recent = await asyncio.to_thread(instagram.list_recent, username, 1, cookies, proxy)
         except Exception as e:
             log.warning("ig add: couldn't read @%s (%s)", username, _short(e))
             await interaction.followup.send(
@@ -109,7 +132,8 @@ class Instagram(commands.Cog):
         ping = f" and ping {mentions.mention_string(mtype, mid)}" if mtype else ""
         await interaction.followup.send(
             f"✅ Watching **@{username}** → {target.mention}{ping}. New posts will show up there.\n"
-            f"_(Instagram is checked slowly — about every 30 min — to keep the account safe.)_",
+            f"_(Instagram is polled slowly to keep the account safe — expect new posts within "
+            f"~10–30 min depending on how many accounts are watched.)_",
             ephemeral=True)
 
     @ig.command(name="remove", description="Stop forwarding an Instagram account")
@@ -159,10 +183,10 @@ class Instagram(commands.Cog):
         # Strip Discord's redundant link-preview embed now that we've reposted it.
         await suppress_link_embeds(message, self.bot.cfg)
 
-    # ---- paced scheduler (slow, IG-specific) ------------------------------
+    # ---- paced scheduler (per-burner, slow) -------------------------------
 
     def _spacing(self, account_count):
-        target = float(self.bot.cfg.get("ig_sweep_target_seconds", 1800))
+        target = float(self.bot.cfg.get("ig_sweep_target_seconds", 900))
         floor = float(self.bot.cfg.get("ig_min_request_spacing", 20))
         return max(floor, target / max(account_count, 1))
 
@@ -170,52 +194,57 @@ class Instagram(commands.Cog):
         j = float(self.bot.cfg.get("ig_request_jitter", 5))
         return max(1.0, spacing + random.uniform(-j, j))
 
-    async def _run_poller(self):
+    async def _run_poller(self, bi):
         await self.bot.wait_until_ready()
-        log.info("instagram poller alive (slow paced scheduler)")
+        log.info("instagram poller %d alive (of %d burner(s))", bi, len(self.bot.ig_burners))
         while not self.bot.is_closed():
             try:
-                await self._one_sweep()
+                await self._one_sweep(bi)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("ig poller sweep crashed; backing off 30s")
+                log.exception("ig poller %d sweep crashed; backing off 30s", bi)
                 await asyncio.sleep(30)
 
-    async def _one_sweep(self):
+    async def _one_sweep(self, bi):
+        cookies = self.bot.ig_burners[bi]["cookies"]
+        proxy = self.bot.ig_burners[bi]["proxy"]
+
         rows = await db.get_enabled(self.bot.db_path, "instagram", "post")
         by_user = defaultdict(list)
         for username, channel_id, mtype, mid, last_seen in rows:
+            # Only handle accounts assigned to THIS burner.
+            if self._burner_for(username)[0] != bi:
+                continue
             by_user[username].append((channel_id, mtype, mid, last_seen))
         if not by_user:
-            await asyncio.sleep(30)  # nothing watched yet — idle, don't busy-loop
+            await asyncio.sleep(30)  # nothing on this burner yet — idle
             return
 
-        spacing = self._spacing(len(by_user)) * self._backoff
+        spacing = self._spacing(len(by_user)) * self._backoff[bi]
         failures = 0
         for username, subs in by_user.items():
-            if not await self._check_account(username, subs):
+            if not await self._check_account(username, subs, cookies, proxy):
                 failures += 1
             await asyncio.sleep(self._jittered(spacing))
 
         if failures / len(by_user) >= 0.3:
-            self._backoff = min(self._backoff * 2, 8.0)
-            log.warning("ig poll: %d/%d accounts failed — slowing down (spacing x%.0f)",
-                        failures, len(by_user), self._backoff)
-        elif failures == 0 and self._backoff > 1.0:
-            self._backoff = max(self._backoff / 2, 1.0)
-            log.info("ig poll: recovered — easing back (spacing x%.1f)", self._backoff)
+            self._backoff[bi] = min(self._backoff[bi] * 2, 8.0)
+            log.warning("ig poll[%d]: %d/%d accounts failed — slowing down (spacing x%.0f)",
+                        bi, failures, len(by_user), self._backoff[bi])
+        elif failures == 0 and self._backoff[bi] > 1.0:
+            self._backoff[bi] = max(self._backoff[bi] / 2, 1.0)
+            log.info("ig poll[%d]: recovered — easing back (spacing x%.1f)", bi, self._backoff[bi])
 
-    async def _check_account(self, username, subs):
+    async def _check_account(self, username, subs, cookies, proxy):
         scan = int(self.bot.cfg.get("ig_playlist_scan_count", 3))
         try:
-            recent = await asyncio.to_thread(instagram.list_recent, username, scan,
-                                             self.bot.ig_cookies, self.bot.ig_proxy)
+            recent = await asyncio.to_thread(instagram.list_recent, username, scan, cookies, proxy)
         except Exception as e:
             log.warning("ig poll: couldn't list @%s (%s)", username, _short(e))
             return False
         await monitor.forward_new(self.bot, "instagram", username, subs, recent, handle_url,
-                                  self._workdir(), self.bot.ig_cookies, self.bot.ig_proxy, "Instagram")
+                                  self._workdir(), cookies, proxy, "Instagram")
         return True
 
 

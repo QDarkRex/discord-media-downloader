@@ -25,18 +25,37 @@ def _resolve_cookies():
     return path
 
 
-def _resolve_ig_cookies():
-    path = (os.getenv("IG_COOKIES") or "").strip()
-    if not path:
-        log.warning("IG_COOKIES not set — Instagram requires login to view individual posts, so "
-                    "/ig will return 'no media' for most links. Export a cookies.txt from a "
-                    "logged-in (burner) account and point IG_COOKIES at it.")
-        return None
-    if not os.path.exists(path):
-        log.warning("IG_COOKIES set to %s but file not found — continuing without cookies", path)
-        return None
-    log.info("using Instagram cookies from %s", path)
-    return path
+def _resolve_ig_burners():
+    """Build the list of Instagram 'burners' — each a (cookies, proxy) pair used to
+    poll a shard of the watched accounts, so load (and ban risk) is split across
+    separate logins/IPs.
+
+    IG_COOKIES : comma-separated cookie-file paths (one per burner).
+    IG_PROXIES : comma-separated proxy URLs, paired to burners by position
+                 (falls back to the single IG_PROXY for a one-burner setup).
+    """
+    cookie_list = [c.strip() for c in (os.getenv("IG_COOKIES") or "").split(",") if c.strip()]
+    proxy_list = [p.strip() for p in
+                  (os.getenv("IG_PROXIES") or os.getenv("IG_PROXY") or "").split(",") if p.strip()]
+
+    burners = []
+    for i, cookies in enumerate(cookie_list):
+        if not os.path.exists(cookies):
+            log.warning("IG cookie file %s not found — skipping that burner", cookies)
+            continue
+        burners.append({"cookies": cookies, "proxy": proxy_list[i] if i < len(proxy_list) else None})
+
+    if not burners:
+        log.warning("No Instagram cookies configured — /ig monitoring is off, and /ig get will "
+                    "hit the login wall for most posts. Set IG_COOKIES to a burner cookies.txt.")
+    else:
+        withproxy = sum(1 for b in burners if b["proxy"])
+        log.info("Instagram: %d burner(s) configured (%d with a proxy)", len(burners), withproxy)
+        if len(burners) > 1 and withproxy < len(burners):
+            log.warning("Multiple IG burners share one IP (only %d/%d have a proxy) — Instagram links "
+                        "accounts by IP, so give each burner its own proxy for the sharding to help.",
+                        withproxy, len(burners))
+    return burners
 
 
 async def _run():
@@ -62,10 +81,10 @@ async def _run():
     bot.proxy = (os.getenv("TIKTOK_PROXY") or "").strip() or None
     if bot.proxy:
         log.info("routing TikTok requests through a proxy")  # don't log the URL (may hold creds)
-    bot.ig_cookies = _resolve_ig_cookies()
-    bot.ig_proxy = (os.getenv("IG_PROXY") or "").strip() or None
-    if bot.ig_proxy:
-        log.info("routing Instagram requests through a proxy")
+    bot.ig_burners = _resolve_ig_burners()
+    # On-demand /ig get + paste-detect use the first burner (any will do).
+    bot.ig_cookies = bot.ig_burners[0]["cookies"] if bot.ig_burners else None
+    bot.ig_proxy = bot.ig_burners[0]["proxy"] if bot.ig_burners else None
 
     @bot.event
     async def on_ready():

@@ -19,8 +19,8 @@ DEFAULTS = {
     "max_files_per_post": 20,    # safety cap on media files pulled from one IG carousel
     # Instagram monitoring — MUCH slower than TikTok on purpose: Instagram flags
     # aggressive automated access, so we poll each account rarely to protect the burner.
-    "ig_sweep_target_seconds": 1800,  # aim to re-check each IG account ~every 30 min
-    "ig_min_request_spacing": 20,     # never fire IG requests faster than this (seconds)
+    "ig_sweep_target_seconds": 900,   # per-burner: aim to re-check each of its accounts this often
+    "ig_min_request_spacing": 20,     # never fire IG requests faster than this (seconds, per burner)
     "ig_request_jitter": 5,           # +/- random seconds added to IG spacing
     "ig_playlist_scan_count": 3,      # how many recent posts to scan per IG check
     # Upload handling
