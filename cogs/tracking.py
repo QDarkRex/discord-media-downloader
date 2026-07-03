@@ -8,17 +8,22 @@ import asyncio
 import os
 import random
 from collections import defaultdict
-from typing import Optional
+from typing import Optional, Union
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from src import db, tiktok
+from src import db, mentions, monitor, tiktok
 from src.discord_post import handle_url
 from src.log import get_logger
 
 log = get_logger(__name__)
+
+# Where /tt add can route videos: a normal channel or a thread.
+Target = Union[discord.TextChannel, discord.Thread]
+# Who to ping on a new video: a role or a specific person (or @everyone role).
+Tag = Union[discord.Role, discord.Member]
 
 
 def _short(e):
@@ -52,12 +57,15 @@ class Tracking(commands.Cog):
     # ---- commands ---------------------------------------------------------
 
     @tt.command(name="add", description="Track a TikTok account and post its new videos")
-    @app_commands.describe(username="TikTok @username", channel="Where to post (default: this channel)")
+    @app_commands.describe(username="TikTok @username",
+                           channel="Where to post (default: this channel/thread)",
+                           tag="Optional role or person to ping on each new video")
     async def add(self, interaction: discord.Interaction, username: str,
-                  channel: Optional[discord.TextChannel] = None):
+                  channel: Optional[Target] = None, tag: Optional[Tag] = None):
         await interaction.response.defer(ephemeral=True)
         username = tiktok.normalize_username(username)
         target = channel or interaction.channel
+        mtype, mid = mentions.parse_target(tag)
         # Seed baseline = current newest id, so we don't dump the back-catalogue.
         try:
             recent = await asyncio.to_thread(tiktok.list_recent, username, 1,
@@ -69,20 +77,21 @@ class Tracking(commands.Cog):
                 ephemeral=True)
             return
         baseline = recent[0]["id"] if recent else None
-        await db.add_account(self.bot.db_path, username, str(target.id),
-                             str(interaction.guild_id), baseline)
+        await db.add_subscription(self.bot.db_path, "tiktok", username, str(target.id),
+                                  str(interaction.guild_id), "post", mtype, mid, baseline)
+        ping = f" and ping {mentions.mention_string(mtype, mid)}" if mtype else ""
         await interaction.followup.send(
-            f"✅ Tracking **@{username}** → {target.mention}. New videos will post there.",
+            f"✅ Tracking **@{username}** → {target.mention}{ping}. New videos will post there.",
             ephemeral=True)
 
     @tt.command(name="remove", description="Stop tracking a TikTok account")
     @app_commands.describe(username="TikTok @username", channel="Only this channel (default: everywhere)")
     async def remove(self, interaction: discord.Interaction, username: str,
-                     channel: Optional[discord.TextChannel] = None):
+                     channel: Optional[Target] = None):
         await interaction.response.defer(ephemeral=True)
         username = tiktok.normalize_username(username)
-        n = await db.remove_account(self.bot.db_path, username,
-                                    str(channel.id) if channel else None)
+        n = await db.remove_subscription(self.bot.db_path, "tiktok", username,
+                                         str(channel.id) if channel else None)
         if n:
             await interaction.followup.send(f"✅ Removed **@{username}** ({n} subscription(s)).", ephemeral=True)
         else:
@@ -91,14 +100,14 @@ class Tracking(commands.Cog):
     @tt.command(name="list", description="Show tracked TikTok accounts")
     async def list_cmd(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        rows = await db.list_accounts(self.bot.db_path, str(interaction.guild_id))
+        rows = await db.list_subscriptions(self.bot.db_path, "tiktok", str(interaction.guild_id))
         if not rows:
             await interaction.followup.send("No accounts tracked yet. Use `/tt add`.", ephemeral=True)
             return
         lines = []
-        for username, channel_id, _last, enabled in rows:
+        for username, channel_id, _ctype, mtype, mid, _last, enabled in rows:
             mark = "" if enabled else " *(paused)*"
-            lines.append(f"• **@{username}** → <#{channel_id}>{mark}")
+            lines.append(f"• **@{username}** → <#{channel_id}>{mentions.label(mtype, mid)}{mark}")
         await interaction.followup.send("\n".join(lines), ephemeral=True)
 
     @tt.command(name="get", description="Download and post one TikTok video now")
@@ -149,10 +158,10 @@ class Tracking(commands.Cog):
         list in a sweep (a sign TikTok is rate-limiting us), we slow down for the next
         sweep instead of hammering through — and speed back up once it recovers.
         """
-        rows = await db.get_enabled(self.bot.db_path)
+        rows = await db.get_enabled(self.bot.db_path, "tiktok", "post")
         by_user = defaultdict(list)
-        for username, channel_id, last_seen in rows:
-            by_user[username].append((channel_id, last_seen))
+        for username, channel_id, mtype, mid, last_seen in rows:
+            by_user[username].append((channel_id, mtype, mid, last_seen))
         if not by_user:
             await asyncio.sleep(10)  # nothing tracked yet — idle, don't busy-loop
             return
@@ -183,41 +192,8 @@ class Tracking(commands.Cog):
             # Expected occasionally cookie-free (rate-limits, JS challenge, cache lag).
             log.warning("poll: couldn't list @%s (%s)", username, _short(e))
             return False
-        if not recent:
-            return True
-        newest_id = recent[0]["id"]
-
-        for channel_id, last_seen in subs:
-            if last_seen is None:
-                # No baseline yet (account unreachable at add-time) — set it, don't dump.
-                await db.update_last_seen(self.bot.db_path, username, channel_id, newest_id)
-                continue
-
-            new_items = []
-            for item in recent:           # most-recent first
-                if item["id"] == last_seen:
-                    break
-                new_items.append(item)
-            if not new_items:
-                continue
-
-            channel = self.bot.get_channel(int(channel_id))
-            if channel is None:
-                log.warning("poll: channel %s for @%s not found (bot not in it / no access?)",
-                            channel_id, username)
-                continue
-            # Oldest-first. Advance the marker only past videos we actually delivered, so a
-            # transient download failure retries next sweep instead of silently dropping it.
-            for item in reversed(new_items):
-                try:
-                    await handle_url(channel, item["url"], self.bot.cfg,
-                                     self.bot.cookies, self._workdir(), self.bot.proxy)
-                except Exception as e:
-                    log.warning("poll: forward failed for @%s %s (%s); will retry next sweep",
-                                username, item["id"], _short(e))
-                    break
-                await db.update_last_seen(self.bot.db_path, username, channel_id, item["id"])
-                log.info("forwarded @%s video %s -> channel %s", username, item["id"], channel_id)
+        await monitor.forward_new(self.bot, "tiktok", username, subs, recent, handle_url,
+                                  self._workdir(), self.bot.cookies, self.bot.proxy, "TikTok")
         return True
 
 

@@ -41,6 +41,58 @@ def find_links(text):
     return _URL_RE.findall(text or "")
 
 
+def normalize_username(name):
+    """'@Foo/ ' -> 'foo'."""
+    return (name or "").strip().lstrip("@").strip().strip("/").lower()
+
+
+def list_recent(username, count=3, cookies=None, proxy=None, timeout=60):
+    """List an account's most-recent POSTS without downloading media (for monitoring).
+
+    Uses `gallery-dl -j` (metadata-only dump) capped to the newest `count` posts, and
+    de-dupes carousel items down to one entry per post. Returns [{"id": shortcode,
+    "url": post_url}, ...], most-recent first. Needs cookies (Instagram requires login
+    to view a profile). May raise on network/rate-limit errors — callers handle that.
+    """
+    username = normalize_username(username)
+    # /posts/ (not the bare profile, which only *queues* the posts page): -j here
+    # dumps per-item metadata carrying post_shortcode.
+    url = f"https://www.instagram.com/{username}/posts/"
+    cmd = [sys.executable, "-m", "gallery_dl", "-j", "--no-download",
+           "-o", f"extractor.instagram.max-posts={int(count)}",
+           "-o", f"extractor.instagram.user-agent={_CHROME_UA}"]
+    if cookies:
+        cmd += ["--cookies", cookies]
+    if proxy:
+        cmd += ["--proxy", proxy]
+    cmd += ["--", url]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    try:
+        data = json.loads(proc.stdout or "[]")
+    except ValueError:
+        raise RuntimeError((proc.stderr or "gallery-dl produced no JSON").strip()[-300:])
+
+    out, seen = [], set()
+    for entry in data:
+        # gallery-dl -j yields [type, url/data, metadata_dict] tuples; the trailing
+        # dict (when present) carries post_shortcode/post_url.
+        meta = None
+        if isinstance(entry, list) and entry and isinstance(entry[-1], dict):
+            meta = entry[-1]
+        elif isinstance(entry, dict):
+            meta = entry
+        if not meta:
+            continue
+        code = meta.get("post_shortcode") or meta.get("shortcode")
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        out.append({"id": str(code),
+                    "url": meta.get("post_url") or f"https://www.instagram.com/p/{code}/"})
+    return out
+
+
 def is_video(path):
     return os.path.splitext(path)[1].lower() in _VIDEO_EXTS
 

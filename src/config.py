@@ -17,6 +17,12 @@ DEFAULTS = {
     # Instagram (/ig)
     "download_timeout": 180,     # kill a gallery-dl download that runs longer than this (seconds)
     "max_files_per_post": 20,    # safety cap on media files pulled from one IG carousel
+    # Instagram monitoring — MUCH slower than TikTok on purpose: Instagram flags
+    # aggressive automated access, so we poll each account rarely to protect the burner.
+    "ig_sweep_target_seconds": 1800,  # aim to re-check each IG account ~every 30 min
+    "ig_min_request_spacing": 20,     # never fire IG requests faster than this (seconds)
+    "ig_request_jitter": 5,           # +/- random seconds added to IG spacing
+    "ig_playlist_scan_count": 3,      # how many recent posts to scan per IG check
     # Upload handling
     "max_upload_mb": 10,         # Discord free-tier upload cap (~10 MB)
     "compress_oversize": True,   # ffmpeg-compress videos over the cap before falling back to a link
