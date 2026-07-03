@@ -51,10 +51,13 @@ def _resolve_ig_burners():
     else:
         withproxy = sum(1 for b in burners if b["proxy"])
         log.info("Instagram: %d burner(s) configured (%d with a proxy)", len(burners), withproxy)
-        if len(burners) > 1 and withproxy < len(burners):
-            log.warning("Multiple IG burners share one IP (only %d/%d have a proxy) — Instagram links "
-                        "accounts by IP, so give each burner its own proxy for the sharding to help.",
-                        withproxy, len(burners))
+        # One proxy-less burner is fine (it's on the server IP, a *different* IP from the
+        # proxied ones). The problem is 2+ proxy-less burners: they'd share the server IP,
+        # which Instagram links together.
+        noproxy = len(burners) - withproxy
+        if noproxy >= 2:
+            log.warning("%d IG burners have no proxy — they all share the server IP, which Instagram "
+                        "links together (co-ban risk). Give all but one its own proxy.", noproxy)
     return burners
 
 
