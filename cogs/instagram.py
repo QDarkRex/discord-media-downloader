@@ -317,8 +317,7 @@ class Instagram(commands.Cog):
                     await db.update_last_seen(self.bot.db_path, "instagram", username,
                                               channel_id, newest, "story")
                     continue
-                new_ids = [i for i in current_ids if int(i) > int(last_seen)]  # newest-first
-                if not new_ids:
+                if not any(int(i) > int(last_seen) for i in current_ids):
                     continue
                 channel = self.bot.get_channel(int(channel_id))
                 if channel is None:
@@ -327,14 +326,14 @@ class Instagram(commands.Cog):
                 if downloaded is None:
                     downloaded = await asyncio.to_thread(instagram.download_stories, username,
                                                          self._workdir(), cookies, proxy)
-                idmap = {it["id"]: it["path"] for it in downloaded["items"]}
-                for sid in reversed(new_ids):   # oldest-first
-                    path = idmap.get(sid)
-                    if path is None:
-                        # listed but not in the download (expired mid-check) — skip it
-                        await db.update_last_seen(self.bot.db_path, "instagram", username,
-                                                  channel_id, sid, "story")
-                        continue
+                new_items = [it for it in downloaded["items"] if int(it["id"]) > int(last_seen)]
+                if not new_items:
+                    log.warning("ig story: @%s had new listed ids %s but downloaded ids were %s",
+                                username, current_ids, [it["id"] for it in downloaded["items"]])
+                    continue
+                for item in reversed(new_items):   # oldest-first
+                    sid = item["id"]
+                    path = item["path"]
                     scratch = []
                     try:
                         if mtype:

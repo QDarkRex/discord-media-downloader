@@ -5,7 +5,8 @@ on-demand and via account monitoring. Python + discord.py, one Docker container.
 Engines: **yt-dlp** (TikTok) and **gallery-dl** (Instagram).
 
 This file is the single source of truth for anyone (human or AI) picking up the code.
-The **open bug is IG story forwarding** — see [§7](#7-open-bug-instagram-stories-not-forwarding).
+IG story forwarding had a real ID-mismatch bug; the current code includes the robustness fix.
+If stories still do not appear, start with [§7](#7-instagram-stories-debugging).
 
 ---
 
@@ -114,14 +115,14 @@ only be pulled as the **whole current set**. So:
 - `instagram.list_stories(user)` — `gallery-dl -j --no-download` on `instagram.com/stories/<user>/`,
   returns `[{"id": media_id}, ...]` newest-first (from the `media_id` field). Cheap check.
 - `instagram.download_stories(user)` — downloads the whole current set with `--write-metadata`; returns
-  `{"dir", "items": [{"id", "path"}, ...]}` newest-first. **`id` is derived from the leading digits of the
-  downloaded filename** (`_DIGITS_RE`).
+  `{"dir", "items": [{"id", "path"}, ...]}` newest-first. `id` is read from the sidecar JSON
+  `media_id`/`id`, with filename digits as a fallback.
 - `cogs/instagram.Instagram._forward_stories(username, subs, cookies, proxy)`:
   1. `list_stories` → `current_ids` (newest-first).
   2. Per subscription: if `last_seen is None` → seed baseline = newest, continue (never dumps existing).
-     Else `new_ids = [i for i in current_ids if int(i) > int(last_seen)]`.
-  3. If any new, `download_stories` once, build `idmap = {item id -> path}`.
-  4. For each new id oldest-first: `post_media([path], ...)`, advance `last_seen`.
+     Else use `current_ids` only as the cheap "something is newer" gate.
+  3. If any new, `download_stories` once and compute `new_items` from the downloaded set itself.
+  4. For each downloaded new item oldest-first: `post_media([path], ...)`, advance `last_seen`.
 - `/ig add ... type:stories|both` creates a `content_type='story'` subscription (baseline = newest current
   story id, or NULL if none active). Poller checks both post and story subs per account.
 
@@ -130,9 +131,9 @@ Verified locally against natgeo/cristiano/nasa: list ids == download ids, forwar
 
 ---
 
-## 7. OPEN BUG: Instagram stories not forwarding
+## 7. Instagram stories debugging
 
-**Symptom (reported by user):** IG story monitoring "not working" — stories don't appear in Discord.
+**Historical symptom:** IG story monitoring "not working" — stories don't appear in Discord.
 
 Ranked hypotheses, **most likely first** — check in this order:
 
@@ -151,22 +152,18 @@ forwarded — only ones posted *after* subscribing. If the account posted nothin
 - Also: stories expire in 24h; the account may simply have had none during the poll window, or restricts
   visibility (close-friends/hidden), or is private and the burner doesn't follow it.
 
-### H3 — id mismatch between list_stories and download_stories (PROBABLE REAL BUG)
-`_forward_stories` computes `new_ids` from `list_stories` (`media_id` field) but then looks them up in
-`download_stories`'s `idmap` (ids derived from **filenames**). If those two id sources ever differ for an
-account (e.g. video stories, highlights, or a gallery-dl filename format that isn't just `<media_id>.<ext>`),
-then `idmap.get(sid)` is `None`, the item is **silently skipped AND the marker is advanced past it**
-(see the `if path is None:` branch) — so stories are detected but never posted, permanently.
-- **Diagnose:** add temporary logging in `_forward_stories` — log `len(items)`, `new_ids`, and the
-  `idmap` keys; run against a live account with an active story. Or run `instagram.list_stories` and
-  `instagram.download_stories` side by side and compare id sets (they matched in local tests, but the user's
-  monitored accounts differ).
-- **Suggested fix (makes it robust regardless of id derivation):** stop intersecting the two id sources.
-  Use `list_stories` ONLY to decide whether anything is newer than `last_seen` (cheap gate). Once downloading,
-  compute new items from `download_stories`'s OWN `items` (`[it for it in items if int(it["id"]) > int(last_seen)]`)
-  and post those directly. That removes the list-vs-download id dependency entirely. Also make
-  `download_stories` and `list_stories` derive `id` from the SAME field if possible (prefer the sidecar
-  `.json` `media_id` in `download_stories` instead of the filename, and fall back to filename digits).
+### H3 — id mismatch between list_stories and download_stories (fixed)
+Original bug: `_forward_stories` computed `new_ids` from `list_stories` (`media_id` field) but then looked up
+paths from `download_stories` by filename-derived IDs. If those ID sources differed, the story was skipped
+and the marker advanced past it.
+
+Current fix:
+- `download_stories()` prefers the sidecar `.json` `media_id`/`id`, falling back to filename digits only if
+  metadata is missing.
+- `_forward_stories()` uses `list_stories()` only as the cheap "something is newer" gate, then computes
+  `new_items` from `download_stories()["items"]` itself and posts those directly.
+- If the cheap list says something is new but the downloaded set has no matching newer item, the bot logs
+  both ID sets and leaves `last_seen_id` unchanged for retry/diagnosis.
 
 ### H4 — Story listing/downloading failing on the server (cookies/rate-limit)
 - **Check:** `docker compose logs tiktokbot | grep -iE 'story|couldn.t list'`. The poller logs

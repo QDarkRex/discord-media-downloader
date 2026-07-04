@@ -232,11 +232,21 @@ def download_stories(username, dest_dir, cookies=None, proxy=None, timeout=180, 
     for name in os.listdir(work):
         if os.path.splitext(name)[1].lower() not in _MEDIA_EXTS:
             continue
-        # The story's media id is the leading digits of the filename (time-ordered).
-        m = _DIGITS_RE.match(name)
-        if not m:
+        story_id = None
+        sidecar = os.path.join(work, name + ".json")
+        try:
+            with open(sidecar, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            story_id = meta.get("media_id") or meta.get("id")
+        except (OSError, ValueError):
+            pass
+        if not story_id:
+            # Fallback: gallery-dl normally names story media by its media id.
+            m = _DIGITS_RE.match(name)
+            story_id = m.group(1) if m else None
+        if not story_id:
             continue
-        items.append({"id": m.group(1), "path": os.path.join(work, name)})
+        items.append({"id": str(story_id), "path": os.path.join(work, name)})
     items.sort(key=lambda x: int(x["id"]), reverse=True)   # newest-first
     return {"dir": work, "username": username, "items": items[:max_items]}
 
