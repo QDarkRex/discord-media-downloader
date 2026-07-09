@@ -200,6 +200,11 @@ should show the story poller running and whether forwards/failures occurred.
 
 ## 9. Deployment
 
+> **Current deploy status & risks live in [`STATUS.md`](STATUS.md) — read it first.** In short:
+> the live server may be behind `main`, and the Playwright TikTok-story watcher needs **more RAM than
+> `compose.yml`'s `mem_limit: 512m`** (Chromium OOMs). Raise `mem_limit` to ≥1.5g and confirm host
+> headroom **before** setting `tiktok_story_enabled: true`. It also enlarges the image (~1 GB, Chromium).
+
 Container `tiktokbot` on a Docker host (currently a VPS; `data/` bind-mounted).
 - **Code change** → rebuild: `docker compose up -d --build`.
 - **configs.yml-only change** → `docker compose restart`.
